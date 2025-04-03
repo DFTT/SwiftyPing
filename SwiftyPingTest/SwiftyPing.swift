@@ -108,42 +108,51 @@ public class SwiftyPing: NSObject {
         }
         
         /// Resolves the `host`.
-        public static func getIPv4AddressFromHost(host: String) throws -> Data {
-            var streamError = CFStreamError()
-            let cfhost = CFHostCreateWithName(nil, host as CFString).takeRetainedValue()
-            let status = CFHostStartInfoResolution(cfhost, .addresses, &streamError)
-            
-            var data: Data?
-            if !status {
-                if Int32(streamError.domain) == kCFStreamErrorDomainNetDB {
-                    throw PingError.addressLookupError
-                } else {
-                    throw PingError.unknownHostError
-                }
-            } else {
-                var success: DarwinBoolean = false
-                guard let addresses = CFHostGetAddressing(cfhost, &success)?.takeUnretainedValue() as? [Data] else {
-                    throw PingError.hostNotFound
-                }
-                
-                for address in addresses {
-                    let addrin = address.socketAddress
-                    if address.count >= MemoryLayout<sockaddr>.size && addrin.sa_family == UInt8(AF_INET) {
-                        data = address
-                        break
+        public static func getIPv4AddressFromHost(host: String) async throws -> Data {
+            return try await withCheckedThrowingContinuation { continuation in
+                DispatchQueue.global().async {
+                    do {
+                        var streamError = CFStreamError()
+                        let cfhost = CFHostCreateWithName(nil, host as CFString).takeRetainedValue()
+                        let status = CFHostStartInfoResolution(cfhost, .addresses, &streamError)
+                        
+                        var data: Data?
+                        if !status {
+                            if Int32(streamError.domain) == kCFStreamErrorDomainNetDB {
+                                throw PingError.addressLookupError
+                            } else {
+                                throw PingError.unknownHostError
+                            }
+                        } else {
+                            var success: DarwinBoolean = false
+                            guard let addresses = CFHostGetAddressing(cfhost, &success)?.takeUnretainedValue() as? [Data] else {
+                                throw PingError.hostNotFound
+                            }
+                            
+                            for address in addresses {
+                                let addrin = address.socketAddress
+                                if address.count >= MemoryLayout<sockaddr>.size && addrin.sa_family == UInt8(AF_INET) {
+                                    data = address
+                                    break
+                                }
+                            }
+                            
+                            if data?.count == 0 || data == nil {
+                                throw PingError.hostNotFound
+                            }
+                        }
+                        guard let returnData = data else { throw PingError.unknownHostError }
+                        continuation.resume(returning: returnData)
+                    } catch let e {
+                        continuation.resume(throwing: e)
                     }
                 }
-                
-                if data?.count == 0 || data == nil {
-                    throw PingError.hostNotFound
-                }
             }
-            guard let returnData = data else { throw PingError.unknownHostError }
-            return returnData
         }
-
     }
+
     // MARK: - Initialization
+
     /// Ping host
     public let destination: Destination
     /// Ping configuration
@@ -161,8 +170,18 @@ public class SwiftyPing: NSObject {
     public var currentCount: UInt64 {
         return trueSequenceIndex
     }
+
     /// Array of all ping responses sent to the `observer`.
-    public private(set) var responses: [PingResponse] = []
+    private var _responses: [PingResponse] = []
+    public private(set) var responses: [PingResponse] {
+        get {
+            _serial_property.sync { self._responses }
+        }
+        set {
+            _serial_property.sync { self._responses = newValue }
+        }
+    }
+
     /// A random identifier which is a part of the ping request.
     private let identifier = UInt16.random(in: 0..<UInt16.max)
     /// A random UUID fingerprint sent as the payload.
@@ -200,7 +219,16 @@ public class SwiftyPing: NSObject {
         }
     }
     
-    private var erroredIndices = [Int]()
+    private var _erroredIndices = [Int]()
+    private var erroredIndices: [Int] {
+        get {
+            _serial_property.sync { self._erroredIndices }
+        }
+        set {
+            _serial_property.sync { self._erroredIndices = newValue }
+        }
+    }
+
     /// Initializes a pinger.
     /// - Parameter destination: Specifies the host.
     /// - Parameter configuration: A configuration object which can be used to customize pinging behavior.
@@ -265,8 +293,8 @@ public class SwiftyPing: NSObject {
     /// - Parameter configuration: A configuration object which can be used to customize pinging behavior.
     /// - Parameter queue: All responses are delivered through this dispatch queue.
     /// - Throws: A `PingError` if the given host could not be resolved.
-    public convenience init(host: String, configuration: PingConfiguration, queue: DispatchQueue) throws {
-        let result = try Destination.getIPv4AddressFromHost(host: host)
+    public convenience init(host: String, configuration: PingConfiguration, queue: DispatchQueue) async throws {
+        let result = await try Destination.getIPv4AddressFromHost(host: host)
         let destination = Destination(host: host, ipv4Address: result)
         try self.init(destination: destination, configuration: configuration, queue: queue)
     }
